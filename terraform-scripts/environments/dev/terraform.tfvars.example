@@ -1,0 +1,15 @@
+# Copy this file to terraform.tfvars and verify the project ID.
+project_id = "project-fd365bc9-bf65-4f05-bfe"
+region     = "asia-south1"
+
+cluster_name           = "cn-vul-reg-gke"
+artifact_repository_id = "vulnerability-registry"
+sql_instance_name      = "vuln-registry-db"
+sql_database_name      = "vulnerability_registry"
+sql_user_name          = "registry_app"
+
+# Keep false for the initial infrastructure deployment.
+enable_github_wif = false
+github_owner      = ""
+github_repo       = ""
+# Terraform will prompt for db_password. Do not commit a password here.

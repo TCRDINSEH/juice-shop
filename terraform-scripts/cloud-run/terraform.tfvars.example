@@ -1,0 +1,11 @@
+project_id            = "YOUR_PROJECT_ID"
+region                = "asia-south1"
+artifact_repository_id = "vulnerability-registry"
+juice_shop_image      = "asia-south1-docker.pkg.dev/YOUR_PROJECT_ID/vulnerability-registry/juice-shop:latest"
+csv_bucket_name       = "YOUR_GLOBALLY_UNIQUE_CVE_REPORT_BUCKET"
+
+schedule          = "0 2 * * *"
+schedule_time_zone = "Etc/UTC"
+
+# Keep private by default. Enable only for a controlled demo environment.
+allow_unauthenticated = false
