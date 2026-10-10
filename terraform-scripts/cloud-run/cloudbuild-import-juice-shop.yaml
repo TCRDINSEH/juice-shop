@@ -1,0 +1,19 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - pull
+      - bkimminich/juice-shop:latest
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - tag
+      - bkimminich/juice-shop:latest
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/juice-shop:latest
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/juice-shop:latest
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/juice-shop:latest
+substitutions:
+  _REGION: asia-south1
+  _REPOSITORY: vulnerability-registry

@@ -37,11 +37,11 @@ $Region = "asia-south1"
 $Repository = "vulnerability-registry"
 $Registry = "$Region-docker.pkg.dev/$Project/$Repository"
 
-gcloud config set project $Project
-gcloud auth configure-docker "$Region-docker.pkg.dev"
+gcloud.cmd config set project $Project
+gcloud.cmd auth configure-docker "$Region-docker.pkg.dev"
 
 # Run once if the repository does not already exist.
-gcloud artifacts repositories create $Repository `
+gcloud.cmd artifacts repositories create $Repository `
   --repository-format=docker `
   --location=$Region `
   --project=$Project
@@ -53,10 +53,91 @@ docker build -f .\terraform-scripts\cloud-run\scanner\Dockerfile `
   -t "$Registry/juice-shop-cve-exporter:latest" `
   .\terraform-scripts\cloud-run\scanner
 docker push "$Registry/juice-shop-cve-exporter:latest"
+
+# Confirm both images were pushed before running Terraform.
+gcloud.cmd artifacts docker images list $Registry
 ```
 
 Ensure the Artifact Registry repository exists and your identity has
 `roles/artifactregistry.writer` before building and pushing.
+
+### If Docker cannot connect to its engine on Windows
+
+Start Docker Desktop and wait until it reports that its engine is running.
+This app's Dockerfile uses Linux images, so Docker Desktop must be using its
+Linux/WSL 2 engine. Verify from PowerShell:
+
+```powershell
+docker info
+```
+
+If Docker Desktop is unavailable, build in Google Cloud instead (this does not
+use the local Docker daemon). Enable Cloud Build and submit each build from the
+repository root:
+
+```powershell
+gcloud.cmd services enable cloudbuild.googleapis.com --project $Project
+
+gcloud.cmd builds submit .\juice-shop `
+  --tag "$Registry/juice-shop:latest" `
+  --project $Project
+
+gcloud.cmd builds submit .\terraform-scripts\cloud-run\scanner `
+  --tag "$Registry/juice-shop-cve-exporter:latest" `
+  --project $Project
+```
+
+The build log reports the Cloud Build execution identity as
+`720054743088-compute@developer.gserviceaccount.com`. Grant that identity
+Cloud Logging's Logs Writer role (use the service account email from your own
+build output if it differs):
+
+```powershell
+$BuildServiceAccount = "720054743088-compute@developer.gserviceaccount.com"
+gcloud.cmd projects add-iam-policy-binding $Project `
+  --member="serviceAccount:$BuildServiceAccount" `
+  --role="roles/logging.logWriter"
+```
+
+The identity also needs permission to push images to the repository. If a build
+fails with an Artifact Registry permission error, grant writer access on that
+repository:
+
+```powershell
+gcloud.cmd artifacts repositories add-iam-policy-binding $Repository `
+  --location=$Region `
+  --project=$Project `
+  --member="serviceAccount:$BuildServiceAccount" `
+  --role="roles/artifactregistry.writer"
+```
+
+Allow a short time for IAM changes to propagate, then rerun the failed
+`gcloud.cmd builds submit` command.
+
+### If the Juice Shop source build fails during frontend SBOM generation
+
+If the Juice Shop image build fails with `Missing metafile:
+dist/frontend/stats.json`, the frontend build did not produce the bundle
+metadata required by its SBOM step. For an unmodified Juice Shop deployment,
+you can avoid building the source locally or in Cloud Build and copy the
+project's public Docker Hub image into your Artifact Registry repository:
+
+```powershell
+gcloud.cmd builds submit .\terraform-scripts\cloud-run `
+  --config .\terraform-scripts\cloud-run\cloudbuild-import-juice-shop.yaml `
+  --project $Project
+```
+
+The Cloud Build identity needs Artifact Registry Writer on the repository.
+This imports the public `bkimminich/juice-shop:latest` image; it does not
+include any local source changes. Verify the destination image before applying:
+
+```powershell
+gcloud.cmd artifacts docker images list $Registry --include-tags
+```
+
+Confirm `juice-shop` has the `latest` tag and that the
+`juice-shop-cve-exporter` image is present too.
 
 ## Configure and apply
 
@@ -88,8 +169,8 @@ versions, description, and references.
 
 ```powershell
 terraform output
-gcloud run jobs execute juice-shop-cve-export --region $Region --project $Project --wait
-gcloud storage ls "gs://YOUR_BUCKET/cve-findings/**"
+gcloud.cmd run jobs execute juice-shop-cve-export --region $Region --project $Project --wait
+gcloud.cmd storage ls "gs://YOUR_BUCKET/cve-findings/**"
 ```
 
 Review Cloud Run Job logs if the execution fails. The runtime service accounts
@@ -98,7 +179,7 @@ GCS object creation; the Scheduler identity can invoke only the scanner job.
 To grant an individual user access to the private Juice Shop service:
 
 ```powershell
-gcloud run services add-iam-policy-binding juice-shop `
+gcloud.cmd run services add-iam-policy-binding juice-shop `
   --region $Region `
   --project $Project `
   --member="user:YOUR_EMAIL" `
