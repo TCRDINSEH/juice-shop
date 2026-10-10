@@ -1,0 +1,11 @@
+project_id              = "YOUR_PROJECT_ID"
+region                  = "asia-south1"
+artifact_repository_id  = "vulnerability-registry"
+moodle_image            = "asia-south1-docker.pkg.dev/YOUR_PROJECT_ID/vulnerability-registry/moodle:latest"
+moodledata_bucket_name  = "YOUR_GLOBALLY_UNIQUE_MOODLE_DATA_BUCKET"
+admin_email             = "YOUR_EMAIL"
+database_password       = "REPLACE_WITH_A_STRONG_UNIQUE_PASSWORD"
+admin_password          = "REPLACE_WITH_ANOTHER_STRONG_UNIQUE_PASSWORD"
+
+# Set true only if you want unauthenticated access to the classroom demo.
+allow_unauthenticated = false

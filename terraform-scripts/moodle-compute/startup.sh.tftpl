@@ -1,0 +1,169 @@
+#!/bin/bash
+set -euo pipefail
+exec > >(tee -a /var/log/moodle-startup.log | logger -t moodle-startup -s 2>/dev/console) 2>&1
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  apache2 ca-certificates curl git \
+  php libapache2-mod-php php-bcmath php-cli php-curl php-gd php-intl \
+  php-mbstring php-mysql php-opcache php-soap php-xml php-zip
+
+decode_config() {
+  printf '%s' "$1" | base64 --decode
+}
+ADMIN_EMAIL=$(decode_config '${admin_email_b64}')
+ADMIN_FIRSTNAME=$(decode_config '${admin_firstname_b64}')
+ADMIN_LASTNAME=$(decode_config '${admin_lastname_b64}')
+ADMIN_SECRET_NAME=$(decode_config '${admin_secret_name_b64}')
+ADMIN_USERNAME=$(decode_config '${admin_username_b64}')
+DATABASE_NAME=$(decode_config '${database_name_b64}')
+DATABASE_SECRET_NAME=$(decode_config '${database_secret_b64}')
+DATABASE_USERNAME=$(decode_config '${database_username_b64}')
+MOODLE_BRANCH=$(decode_config '${moodle_branch_b64}')
+PROJECT_ID=$(decode_config '${project_id_b64}')
+SITE_FULLNAME=$(decode_config '${site_fullname_b64}')
+SITE_SHORTNAME=$(decode_config '${site_shortname_b64}')
+
+DATA_DEVICE=/dev/disk/by-id/google-moodledata
+for attempt in $(seq 1 60); do
+  if [ -b "$DATA_DEVICE" ]; then
+    break
+  fi
+  sleep 2
+done
+if [ ! -b "$DATA_DEVICE" ]; then
+  echo "Persistent Moodle data disk did not appear." >&2
+  exit 1
+fi
+
+if ! blkid "$DATA_DEVICE" >/dev/null 2>&1; then
+  mkfs.ext4 -F "$DATA_DEVICE"
+fi
+mkdir -p ${moodledata_path}
+DATA_UUID=$(blkid -s UUID -o value "$DATA_DEVICE")
+if ! grep -q "$DATA_UUID" /etc/fstab; then
+  echo "UUID=$DATA_UUID ${moodledata_path} ext4 defaults,nofail 0 2" >> /etc/fstab
+fi
+mount ${moodledata_path}
+chown www-data:www-data ${moodledata_path}
+chmod 2770 ${moodledata_path}
+
+if [ ! -d /var/www/moodle/.git ]; then
+  git clone --depth 1 --branch "$MOODLE_BRANCH" \
+    https://github.com/moodle/moodle.git /var/www/moodle
+fi
+chown -R root:www-data /var/www/moodle
+find /var/www/moodle -type d -exec chmod 0755 {} +
+find /var/www/moodle -type f -exec chmod 0644 {} +
+
+if [ ! -f /var/www/moodle/config.php ] && [ -f ${moodledata_path}/config.php ]; then
+  ln -s ${moodledata_path}/config.php /var/www/moodle/config.php
+fi
+
+cat > /etc/apache2/sites-available/000-default.conf <<'APACHE'
+<VirtualHost *:80>
+    DocumentRoot /var/www/moodle/public
+    <Directory /var/www/moodle/public>
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+    ErrorLog $${APACHE_LOG_DIR}/error.log
+    CustomLog $${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+APACHE
+
+cat > /etc/php/8.2/apache2/conf.d/99-moodle.ini <<'PHPINI'
+memory_limit = 256M
+upload_max_filesize = 100M
+post_max_size = 100M
+max_execution_time = 300
+max_input_vars = 5000
+PHPINI
+
+a2enmod rewrite
+systemctl enable --now apache2
+
+access_secret() {
+  SECRET_NAME="$1"
+  ACCESS_TOKEN=$(curl -fsS \
+    -H 'Metadata-Flavor: Google' \
+    'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+  curl -fsS \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/$SECRET_NAME/versions/latest:access" \
+    | python3 -c 'import base64,json,sys; print(base64.b64decode(json.load(sys.stdin)["payload"]["data"]).decode())'
+}
+
+if [ ! -f /var/www/moodle/config.php ]; then
+  DB_PASSWORD=$(access_secret "$DATABASE_SECRET_NAME")
+  ADMIN_PASSWORD=$(access_secret "$ADMIN_SECRET_NAME")
+
+  for attempt in $(seq 1 30); do
+    if DB_HOST='${sql_private_ip}' \
+      DB_NAME="$DATABASE_NAME" \
+      DB_USER="$DATABASE_USERNAME" \
+      DB_PASSWORD="$DB_PASSWORD" \
+      php -r 'mysqli_report(MYSQLI_REPORT_OFF); $db = @new mysqli(getenv("DB_HOST"), getenv("DB_USER"), getenv("DB_PASSWORD"), getenv("DB_NAME")); exit($db->connect_errno ? 1 : 0);'
+    then
+      break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+      echo "Could not connect to the Cloud SQL database." >&2
+      exit 1
+    fi
+    sleep 10
+  done
+
+  php /var/www/moodle/admin/cli/install.php \
+    --non-interactive \
+    --agree-license \
+    --lang=en \
+    --wwwroot='${wwwroot}' \
+    --dataroot='${moodledata_path}' \
+    --dbtype=mysqli \
+    --dbhost='${sql_private_ip}' \
+    --dbname="$DATABASE_NAME" \
+    --dbuser="$DATABASE_USERNAME" \
+    --dbpass="$DB_PASSWORD" \
+    --prefix=mdl_ \
+    --dbport=3306 \
+    --fullname="$SITE_FULLNAME" \
+    --shortname="$SITE_SHORTNAME" \
+    --adminuser="$ADMIN_USERNAME" \
+    --adminpass="$ADMIN_PASSWORD" \
+    --adminemail="$ADMIN_EMAIL" \
+    --adminfirstname="$ADMIN_FIRSTNAME" \
+    --adminlastname="$ADMIN_LASTNAME"
+
+  mv /var/www/moodle/config.php ${moodledata_path}/config.php
+  chown root:www-data ${moodledata_path}/config.php
+  chmod 0640 ${moodledata_path}/config.php
+  ln -s ${moodledata_path}/config.php /var/www/moodle/config.php
+fi
+
+cat > /etc/systemd/system/moodle-cron.service <<'SERVICE'
+[Unit]
+Description=Run Moodle scheduled tasks
+
+[Service]
+Type=oneshot
+User=www-data
+ExecStart=/usr/bin/php /var/www/moodle/admin/cli/cron.php
+SERVICE
+
+cat > /etc/systemd/system/moodle-cron.timer <<'TIMER'
+[Unit]
+Description=Run Moodle scheduled tasks every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMER
+
+systemctl daemon-reload
+systemctl enable --now moodle-cron.timer
